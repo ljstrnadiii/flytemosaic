@@ -1,0 +1,126 @@
+[project]
+name = "flyte-xarray-examples"
+version = "0.1.0"
+description = "Add your description here"
+authors = ["Len Strnad <ljstrnadiii@gmail.com>"]
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "flytekit>=1.15.0",
+    "geopandas>=1.0.1",
+    "ipykernel>=6.29.5",
+    "xarray>=2025.1.2",
+]
+
+[dependency-groups]
+dev = [
+    "mypy>=1.15.0",
+    "pre-commit>=4.1.0",
+    "pytest>=8.3.5",
+    "ruff>=0.9.9",
+]
+
+[tool.ruff]
+line-length = 100
+force-exclude = true
+extend-exclude = [
+    ".bzr",
+    ".direnv",
+    ".eggs",
+    ".git",
+    ".mypy_cache",
+    ".nox",
+    ".pants.d",
+    ".ruff_cache",
+    ".venv",
+    "__pypackages__",
+    "_build",
+    "buck-out",
+    "build",
+    "dist",
+    "notebooks", # temporary, until we achieve compatibility with ruff ≥ 0.6
+    "venv",
+    "docs",
+    "src/zarr/v2/",
+    "tests/v2/",
+]
+
+[tool.ruff.lint]
+extend-select = [
+    "ANN",  # flake8-annotations
+    "B",    # flake8-bugbear
+    "EXE",  # flake8-executable
+    "C4",   # flake8-comprehensions
+    "FA",   # flake8-future-annotations
+    "FLY",  # flynt
+    "FURB", # refurb
+    "G",    # flake8-logging-format
+    "I",    # isort
+    "ISC",  # flake8-implicit-str-concat
+    "LOG",  # flake8-logging
+    "PERF", # Perflint
+    "PIE",  # flake8-pie
+    "PGH",  # pygrep-hooks
+    "PT",   # flake8-pytest-style
+    "PYI",  # flake8-pyi
+    "RET",  # flake8-return
+    "RSE",  # flake8-raise
+    "RUF",
+    "SIM",  # flake8-simplify
+    "SLOT", # flake8-slots
+    "TCH",  # flake8-type-checking
+    "TRY",  # tryceratops
+    "UP",   # pyupgrade
+    "W",    # pycodestyle warnings
+]
+ignore = [
+    "ANN401",
+    "PT011",  # TODO: apply this rule
+    "PT012",  # TODO: apply this rule
+    "RET505",
+    "RET506",
+    "RUF005",
+    "SIM108",
+    "TRY003",
+    "UP038",  # https://github.com/astral-sh/ruff/issues/7871
+    # https://docs.astral.sh/ruff/formatter/#conflicting-lint-rules
+    "W191",
+    "E111",
+    "E114",
+    "E117",
+    "D206",
+    "D300",
+    "Q000",
+    "Q001",
+    "Q002",
+    "Q003",
+    "COM812",
+    "COM819",
+]
+
+[tool.ruff.lint.extend-per-file-ignores]
+"tests/**" = ["ANN001", "ANN201", "RUF029", "SIM117", "SIM300"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+namespace_packages = false
+
+[tool.numpydoc_validation]
+# See https://numpydoc.readthedocs.io/en/latest/validation.html#built-in-validation-checks for list of checks
+checks = [
+    "GL06",
+    "GL07",
+    # Currently broken; see https://github.com/numpy/numpydoc/issues/573
+    # "GL09",
+    "GL10",
+    "SS02",
+    "SS04",
+    "PR02",
+    "PR03",
+    "PR05",
+    "PR06",
+]
+
+[tool.codespell]
+ignore-words-list = "strnad"
