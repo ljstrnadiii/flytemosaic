@@ -1,16 +1,19 @@
 [project]
-name = "flyte-xarray-examples"
+name = "flytemosaic"
 version = "0.1.0"
 description = "Add your description here"
-authors = ["Len Strnad <ljstrnadiii@gmail.com>"]
+authors = [{name="Len Strnad", email="ljstrnadiii@gmail.com"}]
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = [
-    "flytekit>=1.15.0",
-    "geopandas>=1.0.1",
-    "ipykernel>=6.29.5",
-    "xarray>=2025.1.2",
-]
+
+# we avoid duplicating. See environments.yml and pip install with --no-deps
+dependencies = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.setuptools]
+packages = ["flytemosaic", "flyte"]
 
 [dependency-groups]
 dev = [

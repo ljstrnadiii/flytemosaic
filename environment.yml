@@ -1,0 +1,27 @@
+# environment.yml
+name: flytemosaic
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - xarray>=2025.1.2
+  - zarr
+  - dask
+  - distributed
+  - geopandas>=1.0.1
+  - rioxarray>=0.18.2
+  # for the dask dashboard
+  - bokeh>=3.1.0
+  - pyarrow>=19.0.1
+  - ipykernel>=6.29.5
+  # critical conda-only packages
+  - gdal=3.10
+  - aria2
+  # some packages are only on pypi
+  - pip
+  - pip:
+      - flytekitplugins-dask>=1.15.0
+      - union>=0.1.152
+    # below items are for development
+      - pre-commit
+  - pytest

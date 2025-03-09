@@ -3,6 +3,7 @@
   "python.testing.pytestArgs": [
     "tests"
   ],
+  "python.testing.unittestEnabled": false,
   "python.testing.pytestEnabled": true,
   "mypy-type-checker.args": [
     "--config-file=./pyproject.toml"
@@ -10,7 +11,6 @@
   "python.analysis.typeCheckingMode": "off",
   "editor.formatOnSave": true,
   "ruff.configuration": "--config=./pyproject.toml",
-  "python.testing.unittestEnabled": false,
   "[ignore]": {
     "editor.defaultFormatter": "foxundermoon.shell-format"
   }

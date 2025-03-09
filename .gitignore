@@ -1,10 +1,10 @@
 .mypy_cache
 .pytest_cache
 .venv
+.ruff_cache
 
 __pycache__/
 *.py[cod]
 
-**/flyte-package.tgz
-
-notebooks/examples.ipynb
+notebooks
+*.egg-info

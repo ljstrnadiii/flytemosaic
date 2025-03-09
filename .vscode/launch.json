@@ -8,7 +8,7 @@
       "program": "${file}",
       "purpose": ["debug-in-terminal"],
       "console": "integratedTerminal",
-      "justMyCode": true,
+      "justMyCode": false,
       "env": {
         "PYTHONPATH": "${workspaceFolder}"
       }
