@@ -156,6 +156,7 @@ class GladARDSceneSource(SceneSourceProtocol):
                 # https://gdal.org/en/stable/drivers/raster/cog.html#creation-options
                 BLOCKSIZE=512,
                 BIGTIFF="IF_SAFER",
+                NUM_THREADS="4",
             )
             dst_url = str(dst_bucket / str(tif_path.relative_to(workdir)))
             if isinstance(fs, LocalFileSystem):
