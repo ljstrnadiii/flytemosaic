@@ -8,6 +8,7 @@ import geopandas as gpd
 import pandas as pd
 from distributed import Client, LocalCluster
 from flytekit import Resources, task
+from flytekit.exceptions.user import FlyteUserException
 from flytekitplugins.deck.renderer import FrameProfilingRenderer
 from more_itertools import chunked
 from shapely import box
@@ -65,19 +66,25 @@ def partition_gdf_task(gdf: gpd.GeoDataFrame, dataset_enum: DatasetEnum) -> list
     requests=Resources(cpu="2", mem="8Gi", ephemeral_storage=str(_EPHEMERAL_STORAGE)),
     enable_deck=True,
     deck_fields=None,
+    retries=3,
 )
 def scrape_and_upload_batch_task(
     gdf: gpd.GeoDataFrame, dataset_enum: DatasetEnum
 ) -> gpd.GeoDataFrame:
     ctx = flytekit.current_context()
     scene_source = get_dataset_protocol(dataset_enum=dataset_enum).scene_protocol
-    gdf = scene_source.scrape_tifs_uploads_cogs_batch(
-        gdf=gdf,
-        workdir=ctx.working_directory,
-        bucket=get_default_bucket(),
-        user=ctx.secrets.get(key="glad_user"),
-        password=ctx.secrets.get(key="glad_password"),
-    )
+
+    try:
+        gdf = scene_source.scrape_tifs_uploads_cogs_batch(
+            gdf=gdf,
+            workdir=ctx.working_directory,
+            bucket=get_default_bucket(),
+            user=ctx.secrets.get(key="glad_user"),
+            password=ctx.secrets.get(key="glad_password"),
+        )
+    except Exception as e:
+        raise FlyteUserException(f"Failed to scrape and upload batch: {e}") from e
+
     flytekit.Deck(
         "Summary",
         FrameProfilingRenderer().to_html(df=pd.DataFrame(gdf.drop(columns=["geometry"]))),
