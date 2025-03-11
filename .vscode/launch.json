@@ -6,11 +6,14 @@
       "type": "python",
       "request": "launch",
       "program": "${file}",
-      "purpose": ["debug-in-terminal"],
+      "purpose": [
+        "debug-in-terminal"
+      ],
       "console": "integratedTerminal",
       "justMyCode": false,
       "env": {
-        "PYTHONPATH": "${workspaceFolder}"
+        "PYTHONPATH": "${workspaceFolder}",
+        "PATH": "/opt/homebrew/Caskroom/mambaforge/base/envs/flytemosaic/bin:${env:PATH}"
       }
     },
     {
@@ -18,7 +21,9 @@
       "type": "python",
       "request": "launch",
       "program": "${file}",
-      "purpose": ["debug-test"],
+      "purpose": [
+        "debug-test"
+      ],
       "console": "integratedTerminal",
       "justMyCode": false,
       "env": {
