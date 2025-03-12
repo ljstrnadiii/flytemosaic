@@ -1,13 +1,15 @@
 # Building Large Xarray Mosaics with Flyte + GDAL
-This is an example repo to demonstrate:
+Accompanying slides can be found [here](https://docs.google.com/presentation/d/1kGUqyaFuJjAu9upxVZpFDRlxjcI27u2EJpHvfjQiOYQ/edit?usp=sharing).
+
+This project demonstrates:
 - UnionAI/Flyte to orchestrate e2e workflows to ingest and build xarrays
 - GDAL's GTI with rioxarray to efficiently build large Xarray datasets
 - Flyte-Dask plugin for dask clusters at your fingertips
 
-## Up Next
-- [ ] Add ingest workflows for downloading GLAD ARD tifs with aria2.
-- [ ] Add workflows to build large xarray to zarr
-- [ ] Demo multiple approaches of parallelization of ^.
+
+## Entrypoint
+Not sure where to start? Look to the `flyte/build.py:build_dataset_mosaic_workflow`
+workflow for the main entrypoint defining a workflow to build mosaics.
 
 ## Nice-to-Haves:
 1. add basic github actions for testing, linting, pre-commit, building and pushing container to gchr?
