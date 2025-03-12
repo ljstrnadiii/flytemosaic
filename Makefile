@@ -9,15 +9,9 @@ lock:
 	conda-lock --mamba  -f environment.yml -p linux-64 -p osx-64 -p osx-arm64
 
 install:
-	@if conda env list | grep -q $(PACKAGE_NAME); then \
-		echo "🔄 Updating Conda environment: $(PACKAGE_NAME)"; \
-		mamba env update --name $(PACKAGE_NAME) --file conda-lock.yml --prune; \
-		mamba run --no-capture-output --name $(PACKAGE_NAME) pip install -e . --no-deps; \
-	else \
-		echo "🚀 Creating new Conda environment: $(PACKAGE_NAME)"; \
-		conda-lock install --mamba --name $(PACKAGE_NAME) $(LOCK_FILE); \
-		mamba run --no-capture-output --name $(PACKAGE_NAME) pip install -e . --no-deps; \
-	fi
+	@echo "🚀 Creating new Conda environment: $(PACKAGE_NAME)"
+	conda-lock install --name $(PACKAGE_NAME) $(LOCK_FILE)
+	mamba run --no-capture-output --name $(PACKAGE_NAME) pip install -e . --no-deps
 	@echo "✅ Conda environment '$(PACKAGE_NAME)' is ready!"
 
 build-push:

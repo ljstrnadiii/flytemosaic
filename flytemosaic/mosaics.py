@@ -17,6 +17,7 @@ from rasterio.enums import Resampling
 
 def build_recommended_gti(
     gdf: gpd.GeoDataFrame,
+    url_col_name: str,
     dst: str,
     crs: CRS,
     bounds: tuple[float, float, float, float],
@@ -26,7 +27,7 @@ def build_recommended_gti(
     dtype: str = "Float32",
     nodata: str = "NaN",
     resampling: str = Resampling.average.name,
-) -> str:
+) -> None:
     """
     Build a recommended GDAL Raster Tile Index from a GeoDataFrame of ingested COGs.
 
@@ -47,7 +48,8 @@ def build_recommended_gti(
         allowed to be in different CRS!
     dst : str
         The path to the output GTI file. This should be a VSI path if you want
-        or a local path with existing parent dirs.
+        or a local path with existing parent dirs. The caller will likely be
+        best managers of temporary files. suffix with `*.gti.fgb`.
     crs : CRS
         The CRS of the GTI. This is used to set the SRS metadata in the GTI.
     bounds : tuple[float, float, float, float]
@@ -65,16 +67,10 @@ def build_recommended_gti(
     resampling : str
         The resampling method to use for the GTI. Default is "average" and
         see GDAL GTI docs on RESAMPLING.
-
-    Returns
-    -------
-    str
-        The path to the generated GTI file.
-
     """
     gdf = gdf.to_crs(crs)
     gdf["location"] = (
-        gdf["location"].str.replace("gs://", "/vsigs/").str.replace("s3://", "/vsis3/")
+        gdf[url_col_name].str.replace("gs://", "/vsigs/").str.replace("s3://", "/vsis3/")
     )
     with tempfile.TemporaryDirectory() as tmpdir:
         tile_index_path = str(Path(tmpdir) / "prelim.gti.fgb")
@@ -113,7 +109,6 @@ def build_recommended_gti(
             ],
             check=True,
         )
-    return dst
 
 
 def build_gti_xarray(
@@ -173,8 +168,8 @@ def build_gti_xarray(
     )
     da["band"] = band_names
     if time is not None:
-        da.expand_dims("time")
-        da["time"] = ("time", time)
+        da = da.expand_dims("time")
+        da["time"] = [time]
     return da.to_dataset(name="variables")
 
 
@@ -221,14 +216,13 @@ def build_temporal_mosaic(gti_mosaics: list[TemporalGTIMosaic]) -> xr.Dataset:
             dim="time",
         )
         .transpose("time", "band", "y", "x")
-        .to_dataset(name="variables")
+        .chunk({"time": 1})
     )
 
 
 def build_mosaic_chunk_partitions(
-    da: xr.DataArray,
-    chunk_partition_size: float,
-) -> Generator[dict[str, list[tuple[int, int]]], None, None]:
+    ds: xr.Dataset, chunk_partition_size: float, variable_name: str
+) -> Generator[dict[str, tuple[int, int]], None, None]:
     """
     Given an Xarray Dataset with maximum chunk size build slice start/end indices.
 
@@ -241,10 +235,13 @@ def build_mosaic_chunk_partitions(
 
     Parameters
     ----------
-    da : xr.DataArray
+    ds : xr.Dataset
         The xarray array from which to use chunk sizes to build partitions.
     chunk_partition_size : float
         The maximum size of the partition in bytes. The final size of the
+    variable_name : str
+        The example variable to use to inspect underlying chunks for size.
+
 
     Returns
     -------
@@ -254,22 +251,20 @@ def build_mosaic_chunk_partitions(
         avoid slice objects explicitly in favor of primitive types for easier
         serialization for distributed computing.
     """
-    arr = da["variables"].data
+    ds = ds.chunk({"band": -1})
+    arr = ds[variable_name].data
     bytes_per_chunk = int(np.prod(arr.chunksize) * arr.dtype.itemsize)
 
     xy_multiplier = max(1, floor((chunk_partition_size // bytes_per_chunk) ** 0.5))
     if xy_multiplier != 1:
-        x_chunksize = xy_multiplier * da.chunksizes["x"][0]
-        y_chunksize = xy_multiplier * da.chunksizes["y"][0]
-        da = da.chunk(x=x_chunksize, y=y_chunksize)
+        x_chunksize = xy_multiplier * ds.chunksizes["x"][0]
+        y_chunksize = xy_multiplier * ds.chunksizes["y"][0]
+        ds = ds.chunk(x=x_chunksize, y=y_chunksize)
 
-    # assumes da.dims maintains same order as da.chunksizes, check!
-    assert list(da.chunksizes.keys()) == list(da.dims), "This is unexpected!"
-
-    chunk_idx = {dim: np.cumsum([0] + list(da.chunksizes[dim])).tolist() for dim in da.chunksizes}
+    chunk_idx = {dim: np.cumsum([0] + list(ds.chunksizes[dim])).tolist() for dim in ds.chunksizes}
     chunks = {
         dim: [(chunk_idx[dim][i], chunk_idx[dim][i + 1]) for i in range(len(chunk_idx[dim]) - 1)]
         for dim in chunk_idx
     }
     for slc in product(*chunks.values()):
-        yield dict(zip(list(da.dims.keys()), slc, strict=True))  # type: ignore  # noqa: PGH003
+        yield dict(zip(list(ds.chunksizes.keys()), slc, strict=True))  # type: ignore  # noqa: PGH003

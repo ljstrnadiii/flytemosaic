@@ -15,6 +15,7 @@ from union import map_task, workflow
 
 from flyte.utils import get_default_bucket
 from flytemosaic.datasets import DatasetEnum, get_dataset_protocol
+from flytemosaic.datasets.protocols import TileDate, TileDateUrl
 
 _EPHEMERAL_STORAGE = 32 * 1024**3
 _SCRAPE_CONCURRENCY = 32  # be nice to UMD's servers
@@ -29,15 +30,14 @@ _SCRAPE_CONCURRENCY = 32  # be nice to UMD's servers
 )
 def get_required_scenes_task(
     bbox: list[float],
-    start: datetime.datetime,
-    end: datetime.datetime,
+    times: list[datetime.datetime],
     dataset_enum: DatasetEnum,
 ) -> gpd.GeoDataFrame:
     dp = get_dataset_protocol(dataset_enum=dataset_enum)
+    times = list({dp.snap_to_temporal_grid(t) for t in times})
     gdf = dp.get_required_scenes_gdf(
         geo=box(*bbox),
-        start=start.replace(tzinfo=None),
-        end=end.replace(tzinfo=None),
+        times=times,
     )
     # in case an implemented dataset protocol returns duplicates
     gdf = gdf.drop_duplicates()
@@ -62,27 +62,21 @@ def partition_gdf_task(gdf: gpd.GeoDataFrame, dataset_enum: DatasetEnum) -> list
         flytekit.Secret(key="glad_user"),
         flytekit.Secret(key="glad_password"),
     ],
-    requests=Resources(cpu="2", mem="8Gi", ephemeral_storage=str(_EPHEMERAL_STORAGE)),
-    enable_deck=True,
-    deck_fields=None,
+    requests=Resources(cpu="4", mem="8Gi", ephemeral_storage=str(_EPHEMERAL_STORAGE)),
+    retries=3,
 )
 def scrape_and_upload_batch_task(
     gdf: gpd.GeoDataFrame, dataset_enum: DatasetEnum
 ) -> gpd.GeoDataFrame:
     ctx = flytekit.current_context()
     scene_source = get_dataset_protocol(dataset_enum=dataset_enum).scene_protocol
-    gdf = scene_source.scrape_tifs_uploads_cogs_batch(
+    return scene_source.scrape_tifs_uploads_cogs_batch(
         gdf=gdf,
         workdir=ctx.working_directory,
         bucket=get_default_bucket(),
-        user=ctx.secrets.get(key="glad_user"),
-        password=ctx.secrets.get(key="glad_password"),
+        # user=ctx.secrets.get(key="glad_user"),
+        # password=ctx.secrets.get(key="glad_password"),
     )
-    flytekit.Deck(
-        "Summary",
-        FrameProfilingRenderer().to_html(df=pd.DataFrame(gdf.drop(columns=["geometry"]))),
-    )
-    return gdf
 
 
 @task(
@@ -140,8 +134,7 @@ def generate_expected_scenes_gdf(
 @workflow
 def ingest_scenes_workflow(
     bbox: list[float],
-    start: datetime.datetime,
-    end: datetime.datetime,
+    times: list[datetime.datetime],
     dataset: DatasetEnum,
 ) -> gpd.GeoDataFrame:
     """
@@ -151,10 +144,9 @@ def ingest_scenes_workflow(
     ----------
     bbox : list[float]
         The bounding box of which to use for the extent of the final mosaic.
-    start : datetime.datetime
-        The start date of the time range.
-    end : datetime.datetime
-        The end date of the time range.
+    times : list[datetime.datetime]
+        The times to use for final derived feature dates. These may be snapped
+        to the underlying temporal grid of the dataset.
     dataset : DatasetEnum
         The dataset to ingest which determines the scenes to scrape and upload.
 
@@ -166,26 +158,20 @@ def ingest_scenes_workflow(
     """
     scenes_gdf = get_required_scenes_task(
         bbox=bbox,
-        start=start,
-        end=end,
+        times=times,
         dataset_enum=dataset,
     )
-    scenes_to_ingest = determine_scenes_to_ingest(
+    scenes_to_ingest_gdf = determine_scenes_to_ingest(
         gdf=scenes_gdf,
         dataset_enum=dataset,
     )
     batches_of_scenes_gdfs = partition_gdf_task(
-        gdf=scenes_to_ingest,
-        dataset_enum=dataset,
-    )
-
-    scrape_upload_partial = partial(
-        scrape_and_upload_batch_task,
+        gdf=scenes_to_ingest_gdf,
         dataset_enum=dataset,
     )
 
     map_task(
-        scrape_upload_partial,
+        partial(scrape_and_upload_batch_task, dataset_enum=dataset),
         concurrency=_SCRAPE_CONCURRENCY,
     )(gdf=batches_of_scenes_gdfs)
 
@@ -195,17 +181,81 @@ def ingest_scenes_workflow(
     )
 
 
-# if __name__ == "__main__":
-#     gdf = ingest_scenes_workflow(
-#         bbox=[
-#             -109.05919619986199,
-#             36.99275055519555,
-#             -102.04212644366443,
-#             41.00198213121131,
-#         ],
-#         start=datetime.datetime(2021, 1, 1),
-#         end=datetime.datetime(2021, 1, 2),
-#         dataset_enum=DatasetEnum.GLAD_ARD_ANNUAL_MEAN,
-#         download_scene_batch_size=10,
-#     )
-#     gdf
+@task(cache=True, cache_version="0.0.1")
+def get_tile_dates_task(
+    bbox: list[float],
+    dataset_enum: DatasetEnum,
+    times: list[datetime.datetime],
+) -> list[TileDate]:
+    dp = get_dataset_protocol(dataset_enum=dataset_enum)
+    times = list({dp.snap_to_temporal_grid(t) for t in times})
+    return dp.get_tile_dates(geo=box(*bbox), times=times)
+
+
+@task(
+    cache=True,
+    cache_version="0.0.1",
+    requests=Resources(cpu="3", mem="8Gi"),
+)
+def build_tile_date_feature_cog_task(
+    tile_date: TileDate,
+    dataset_enum: DatasetEnum,
+) -> TileDateUrl:
+    dp = get_dataset_protocol(dataset_enum=dataset_enum)
+    ctx = flytekit.current_context()
+    with LocalCluster(n_workers=3) as cluster, Client(cluster):
+        return dp.build_tile_date_cog(
+            tile_id=tile_date.tile_id,
+            time=tile_date.time,
+            bucket=get_default_bucket(),
+            workdir=ctx.working_directory,
+        )
+
+
+@task(cache=True, cache_version="0.0.1")
+def build_tile_date_url_gdf(
+    tile_date_urls: list[TileDateUrl], dataset_enum: DatasetEnum
+) -> gpd.GeoDataFrame:
+    dp = get_dataset_protocol(dataset_enum=dataset_enum)
+    geos = dp.get_geo_from_tile_ids(tile_ids=[tdu.tile_id for tdu in tile_date_urls])
+    gdf = gpd.GeoDataFrame(tile_date_urls, geometry=geos, crs="EPSG:4326")
+    gdf.rename(columns={"time": "datetime"}, inplace=True)
+    return gdf[["url", "geometry", "datetime"]]
+
+
+@workflow
+def build_scene_features_workflow(
+    bbox: list[float],
+    times: list[datetime.datetime],
+    dataset: DatasetEnum,
+) -> gpd.GeoDataFrame:
+    """
+    Build derived features from scene-level cogs for tiles touching bbox at times.
+
+    Parameters
+    ----------
+    bbox : list[float]
+        The bounding box of which to use for the extent of the final mosaic.
+    times : list[datetime.datetime]
+        The times to build the derived features for.
+    dataset : DatasetEnum
+        The dataset to use to build the derived features.
+
+    Returns
+    -------
+    gpd.GeoDataFrame
+        A GeoDataFrame of the expected COGs required to create the final mosaic
+        with the provided dataset. Will contains columns 'url', 'geometry',
+        'datetime'.
+    """
+    tile_dates = get_tile_dates_task(bbox=bbox, dataset_enum=dataset, times=times)
+
+    feature_tile_cogs = map_task(
+        partial(build_tile_date_feature_cog_task, dataset_enum=dataset),
+        concurrency=32,
+    )(tile_date=tile_dates)
+
+    return build_tile_date_url_gdf(
+        tile_date_urls=feature_tile_cogs,
+        dataset_enum=dataset,
+    )

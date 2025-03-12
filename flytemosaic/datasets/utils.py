@@ -1,8 +1,11 @@
 import os
 import subprocess
 
+import fsspec
+import fsspec.implementations
 import geopandas as gpd
 import pandas as pd
+from fsspec import AbstractFileSystem
 from yarl import URL
 
 
@@ -50,3 +53,27 @@ def download_files_with_aria(
         + (["--http-user=" + user, "--http-passwd=" + password] if user and password else []),
         check=True,
     )
+
+
+def download_files_with_fsspec(
+    df: pd.DataFrame | gpd.GeoDataFrame,
+    url_column: str,
+    workdir: str,
+) -> None:
+    """
+    Helper to download files in a dataframe with a url column using aria2c.
+
+    Parameters
+    ----------
+    df : pd.DataFrame | gpd.GeoDataFrame
+        The DataFrame with the urls to download. Must have 'url' column.
+    url_column : str
+        The name of the column with the urls.
+    workdir : str
+        The directory to download the files.
+    """
+    urls = df[url_column].tolist()
+    if len(df) > 0:
+        fs: AbstractFileSystem = fsspec.get_filesystem_class(URL(urls[0]).scheme)(anon=True)
+        for url in urls:
+            fs.download(url, os.path.join(workdir, URL(url).path.lstrip("/")))
