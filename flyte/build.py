@@ -1,6 +1,7 @@
 import datetime
 from dataclasses import dataclass
 from functools import partial
+from random import shuffle
 
 import flytekit
 import geopandas as gpd
@@ -23,8 +24,14 @@ from flytemosaic.mosaics import (
     build_temporal_mosaic,
 )
 
+_CACHE_VERSION = "0.0.1"
 
-@task(cache=True, cache_version="0.0.1")
+
+def _cache_version(i: int = 1) -> str:
+    return f"{_CACHE_VERSION}.{i}"
+
+
+@task(cache=True, cache_version=_cache_version())
 def build_gti_inputs_task(
     gdf: gpd.GeoDataFrame, bounds: list[float]
 ) -> tuple[list[gpd.GeoDataFrame], list[list[float]]]:
@@ -39,7 +46,7 @@ class GTIResult:
     gti: FlyteFile
 
 
-@task(cache=True, cache_version="0.0.1")
+@task(cache=True, cache_version=_cache_version())
 def gdf_to_gti_task(
     gdf: gpd.GeoDataFrame,
     dataset_enum: DatasetEnum,
@@ -68,7 +75,7 @@ def gdf_to_gti_task(
 
 @task(
     cache=True,
-    cache_version="0.0.2",
+    cache_version=_cache_version(),
     requests=Resources(cpu="3", mem="8Gi"),
     enable_deck=True,
     deck_fields=None,
@@ -88,7 +95,12 @@ def build_target_mosaic_task(
         )
         for gti in gtis
     ]
-    store = str(get_default_bucket() / flytekit.current_context().execution_id.name / "mosaic.zarr")
+    store = str(
+        get_default_bucket()
+        / "zarr_mosaics"
+        / flytekit.current_context().execution_id.name
+        / "mosaic.zarr"
+    )
     target = build_temporal_mosaic(gti_mosaics=gti_mosaics)
     target.to_zarr(store, compute=False)
     Deck("Target Mosaic Store", target._repr_html_())
@@ -101,7 +113,11 @@ class GTIPartition:
     partition: dict[str, tuple[int, int]]
 
 
-@task(cache=True, cache_version="0.0.1", requests=Resources(cpu="3", mem="8Gi"))
+@task(
+    cache=True,
+    cache_version=_cache_version(),
+    requests=Resources(cpu="3", mem="8Gi"),
+)
 def build_gti_partitions_task(
     store: str, chunk_partition_size: int, gtis: list[GTIResult]
 ) -> list[GTIPartition]:
@@ -110,6 +126,7 @@ def build_gti_partitions_task(
         build_mosaic_chunk_partitions(
             ds=ds.chunk({"time": 1}),
             chunk_partition_size=int(chunk_partition_size),
+            variable_name="variables",
         )
     )
     gti_time = {gti.time: gti for gti in gtis}
@@ -118,12 +135,13 @@ def build_gti_partitions_task(
         t = ds.time.isel(time=slice(*partition["time"])).data[0]
         gti = gti_time[pd.Timestamp(t).to_pydatetime()]
         gti_partitions.append(GTIPartition(gti=gti, partition=partition))
+    shuffle(gti_partitions)
     return gti_partitions
 
 
 @task(
     cache=True,
-    cache_version="0.0.1",
+    cache_version=_cache_version(),
     requests=Resources(cpu="3", mem="8Gi", ephemeral_storage="16Gi"),
     environment=gdal_configs.get_worker_config(8, debug=True),
 )

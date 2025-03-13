@@ -18,12 +18,17 @@ from flytemosaic.datasets import DatasetEnum, get_dataset_protocol
 from flytemosaic.datasets.protocols import TileDate, TileDateUrl
 
 _EPHEMERAL_STORAGE = 32 * 1024**3
-_SCRAPE_CONCURRENCY = 32  # be nice to UMD's servers
+_SCRAPE_CONCURRENCY = 32
+_CACHE_VERSION = "0.0.1"
+
+
+def _cache_version(i: int = 1) -> str:
+    return f"{_CACHE_VERSION}.{i}"
 
 
 @task(
     cache=True,
-    cache_version="0.0.3",
+    cache_version=_cache_version(),
     requests=Resources(cpu="2", mem="8Gi"),
     enable_deck=True,
     deck_fields=None,
@@ -48,7 +53,7 @@ def get_required_scenes_task(
     return gdf
 
 
-@task(cache=True, cache_version="0.0.1", requests=Resources(cpu="2", mem="8Gi"))
+@task(cache=True, cache_version=_cache_version(), requests=Resources(cpu="2", mem="8Gi"))
 def partition_gdf_task(gdf: gpd.GeoDataFrame, dataset_enum: DatasetEnum) -> list[gpd.GeoDataFrame]:
     sp = get_dataset_protocol(dataset_enum=dataset_enum).scene_protocol
     batch_size = int(_EPHEMERAL_STORAGE / (sp.max_bytes_per_file * 2))
@@ -57,7 +62,7 @@ def partition_gdf_task(gdf: gpd.GeoDataFrame, dataset_enum: DatasetEnum) -> list
 
 @task(
     cache=True,
-    cache_version="0.0.1",
+    cache_version=_cache_version(),
     secret_requests=[
         flytekit.Secret(key="glad_user"),
         flytekit.Secret(key="glad_password"),
@@ -81,7 +86,7 @@ def scrape_and_upload_batch_task(
 
 @task(
     cache=True,
-    cache_version="0.0.2",
+    cache_version=_cache_version(),
     requests=Resources(cpu="4", mem="8Gi"),
     enable_deck=True,
     deck_fields=None,
@@ -113,7 +118,7 @@ def determine_scenes_to_ingest(
 
 @task(
     cache=True,
-    cache_version="0.0.3",
+    cache_version=_cache_version(),
     requests=Resources(cpu="4", mem="8Gi"),
     enable_deck=True,
     deck_fields=None,
@@ -181,7 +186,7 @@ def ingest_scenes_workflow(
     )
 
 
-@task(cache=True, cache_version="0.0.1")
+@task(cache=True, cache_version=_cache_version())
 def get_tile_dates_task(
     bbox: list[float],
     dataset_enum: DatasetEnum,
@@ -194,7 +199,7 @@ def get_tile_dates_task(
 
 @task(
     cache=True,
-    cache_version="0.0.1",
+    cache_version=_cache_version(),
     requests=Resources(cpu="3", mem="8Gi"),
 )
 def build_tile_date_feature_cog_task(
@@ -212,7 +217,7 @@ def build_tile_date_feature_cog_task(
         )
 
 
-@task(cache=True, cache_version="0.0.1")
+@task(cache=True, cache_version=_cache_version())
 def build_tile_date_url_gdf(
     tile_date_urls: list[TileDateUrl], dataset_enum: DatasetEnum
 ) -> gpd.GeoDataFrame:
