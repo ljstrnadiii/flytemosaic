@@ -1,9 +1,8 @@
 import datetime
 from functools import partial
-from typing import TYPE_CHECKING, Annotated
+from typing import Annotated
 
 import flytekit
-import fsspec
 import geopandas as gpd
 import numpy as np
 import pandas as pd
@@ -18,9 +17,6 @@ from flyte.utils import get_default_bucket
 from flytemosaic.datasets import DatasetEnum, get_dataset_protocol
 from flytemosaic.datasets.protocols import TileDateUrl
 from flytemosaic.datasets.utils import urls_exists
-
-if TYPE_CHECKING:
-    import s3fs
 
 _EPHEMERAL_STORAGE = 32 * 1024**3
 _SCRAPE_CONCURRENCY = 32
@@ -84,14 +80,11 @@ def scrape_and_upload_batch_task(
     # we check if any files have been ingested since we determined which to run
     # and also in the event this task gets retried due to a recoverable error
     # we only want to scrape and upload the missing files
-    fs: s3fs.S3FileSystem = fsspec.get_filesystem_class(bucket.scheme)()
-    missing = [
-        not fs.exists(scene_source.src_url_to_dst_url(src_url=url, bucket=bucket))
-        for url in gdf["url"]
-    ]
+    urls = [scene_source.src_url_to_dst_url(src_url=url, bucket=bucket) for url in gdf["url"]]
+    exists = urls_exists(urls=urls, bucket=bucket)
     try:
         scene_source.scrape_tifs_and_upload_cogs_batch(
-            gdf=gdf.loc[missing, :],
+            gdf=gdf.loc[~np.array(exists), :],
             workdir=ctx.working_directory,
             bucket=bucket,
         )

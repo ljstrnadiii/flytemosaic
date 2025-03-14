@@ -38,15 +38,13 @@ def _datetime_to_period(time: dt.datetime) -> int:
 
 @lru_cache(maxsize=1)
 def _glad_tile_gdf() -> gpd.GeoDataFrame:
-    gdf = gpd.read_parquet(
+    return gpd.read_parquet(
         os.path.join(
             os.path.dirname(Path(__file__).parent),
             "data",
             "glad_tiling.parquet",
         )
-    )
-    gdf.rename(columns={"TILE": "tile_id"}, inplace=True)
-    return gdf
+    ).rename(columns={"TILE": "tile_id"})
 
 
 def _add_scene_url(period: int, gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
