@@ -1,20 +1,22 @@
 import datetime
 from dataclasses import dataclass
+from itertools import product
+from pathlib import Path
 from typing import Protocol
 
+import fsspec
 import geopandas as gpd
+import xarray as xr
 from shapely.geometry.base import BaseGeometry
 from yarl import URL
 
+from flytemosaic.datasets.utils import scene_urls_to_cog
+
 
 @dataclass
-class TileDate:
+class TileDateUrl:
     tile_id: str
     time: datetime.datetime
-
-
-@dataclass
-class TileDateUrl(TileDate):
     url: str
 
 
@@ -39,9 +41,49 @@ class SceneSourceProtocol(Protocol):
     @property
     def max_bytes_per_file(self) -> int: ...
 
-    def src_url_to_dst_url(self, src_url: str, bucket: URL) -> str: ...
+    @property
+    def host(self) -> str: ...
 
-    def scrape_tifs_uploads_cogs_batch(
+    def tile_date_to_scenes(
+        self,
+        tile_id: str,
+        bucket: URL,
+        time: datetime.datetime,
+        window: datetime.timedelta,
+        earliest: datetime.datetime,
+        latest: datetime.datetime,
+    ) -> list[str]:
+        """
+        Given a tile_id, time, and window, return the relevant scenes.
+
+        This can be used to determine all the scenes that are relevant to a
+        specific tile and time range.
+        """
+        ...
+
+    def src_url_to_dst_url(self, src_url: str, bucket: URL, relative_dir: str | None = None) -> str:
+        """
+        Convert a source URL to a destination URL.
+
+        Parameters
+        ----------
+        src_url : str
+            The source URL with a https://glad.umd.edu/ prefix.
+        bucket : URL
+            The destination bucket URL.
+        relative_dir : str, optional
+            The relative directory to remove from the source URL, by default
+            with use the host.
+
+        Returns
+        -------
+        str
+            The expected destination url given the source url and bucket.
+        """
+        d = relative_dir or self.host
+        return str(self.scene_bucket(bucket) / str(Path(src_url).relative_to(d)))
+
+    def scrape_tifs_and_upload_cogs_batch(
         self,
         gdf: gpd.GeoDataFrame,
         workdir: str,
@@ -126,9 +168,6 @@ class TemporalDatasetProtocol(Protocol):
     @property
     def nodata(self) -> str: ...
 
-    def feature_bucket(self, bucket: URL) -> URL:
-        return bucket / "features"
-
     def get_required_scenes_gdf(
         self, geo: BaseGeometry, times: list[datetime.datetime]
     ) -> gpd.GeoDataFrame:
@@ -165,6 +204,45 @@ class TemporalDatasetProtocol(Protocol):
             The time quantized or snapped to the underlying datasets temporal grid.
         """
 
+    def tiles_to_geos(self, tile_ids: list[str]) -> list[BaseGeometry]:
+        """
+        Compute the geometries (in EPSG:4326) given a tile_id.
+
+        Parameters
+        ----------
+        tile_ids : list[str]
+            The unique identifier of the tile.
+
+        Returns
+        -------
+        list[BaseGeometry]
+            The geometries of each tile in EPSG:4326.
+        """
+        ...
+
+    def geo_to_tiles(self, geo: BaseGeometry) -> gpd.GeoDataFrame:
+        """ """
+        ...
+
+    def scenes_to_feature_cog(self, array: xr.DataArray) -> xr.DataArray:
+        """
+        Given an array with dim "time", apply this to reduce feature over time.
+
+        Parameters
+        ----------
+        array : xr.DataArray
+            The array with dims (time, band, y, x).
+
+        Returns
+        -------
+        xr.DataArray
+            The array with dims (band, y, x).
+        """
+        ...
+
+    def feature_bucket(self, bucket: URL) -> URL:
+        return bucket / "features"
+
     def get_tile_date_url(self, tile_id: str, time: datetime.datetime, bucket: URL) -> str:
         """
         Given a tile and date, return the expected URL of the COG.
@@ -181,16 +259,16 @@ class TemporalDatasetProtocol(Protocol):
         str
             A unique deterministic URL for the derived feature COG.
         """
-        ...
-
-    def get_tile_dates(self, geo: BaseGeometry, times: list[datetime.datetime]) -> list[TileDate]:
-        """
-        ...
-        """
-        ...
+        return str(
+            self.feature_bucket(bucket=bucket) / self.name / f"{tile_id}" / f"{time:%Y%m%d}.tif"
+        )
 
     def build_tile_date_cog(
-        self, tile_id: str, time: datetime.datetime, bucket: URL, workdir: str
+        self,
+        tile_id: str,
+        time: datetime.datetime,
+        bucket: URL,
+        workdir: str,
     ) -> TileDateUrl:
         """
         Given a tile and date, assume scenes have been ingested and build a COG.
@@ -199,25 +277,55 @@ class TemporalDatasetProtocol(Protocol):
         apply summary stats, or any other function to apply over many scenes to
         create a temporal composite.
 
+        Parameters
+        ----------
+        tile_id : str
+            A unique identifier for the tile.
+        time : datetime.datetime
+            The datetime of the derived feature.
+        bucket : URL
+            The destination bucket URL.
+        workdir : str
+            The working directory to store the temporary files.
+
         Returns
         -------
         str
             The URL to the COG stored somewhere based no
         """
         ...
+        url = self.get_tile_date_url(tile_id=tile_id, time=time, bucket=bucket)
+        fs = fsspec.get_filesystem_class(bucket.scheme)()
+        if not fs.exists(url):
+            required_cogs = self.scene_protocol.tile_date_to_scenes(
+                tile_id=tile_id,
+                bucket=bucket,
+                time=time,
+                window=self.window,
+                earliest=self.earliest,
+                latest=self.latest,
+            )
+            # TODO: optionally require all scenes exist?
+            derived_cog = scene_urls_to_cog(
+                urls=required_cogs,
+                workdir=workdir,
+                xfunc=self.scenes_to_feature_cog,
+            )
+            fs.put_file(derived_cog, url)
+        return TileDateUrl(tile_id=tile_id, time=time, url=url)
 
-    def get_geo_from_tile_ids(self, tile_ids: list[str]) -> list[BaseGeometry]:
-        """
-        Compute the geometries (in EPSG:4326) given a tile_id.
-
-        Parameters
-        ----------
-        tile_ids : list[str]
-            The unique identifier of the tile.
-
-        Returns
-        -------
-        list[BaseGeometry]
-            The geometries of each tile in EPSG:4326.
-        """
-        ...
+    def get_tile_date_urls(
+        self, geo: BaseGeometry, times: list[datetime.datetime], bucket: URL
+    ) -> list[TileDateUrl]:
+        relevant_tiles = self.geo_to_tiles(geo=geo)["tile_id"].unique().tolist()
+        return [
+            TileDateUrl(
+                tile_id=tile_id,
+                time=t,
+                url=self.get_tile_date_url(tile_id=tile_id, time=t, bucket=bucket),
+            )
+            for tile_id, t in product(
+                relevant_tiles,
+                {self.snap_to_temporal_grid(time=t) for t in times},
+            )
+        ]

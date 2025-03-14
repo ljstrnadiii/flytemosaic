@@ -1,21 +1,22 @@
 import datetime
 from functools import partial
+from typing import Annotated
 
-import dask
 import flytekit
-import fsspec
 import geopandas as gpd
+import numpy as np
 import pandas as pd
 from distributed import Client, LocalCluster
-from flytekit import Resources, task
+from flytekit import HashMethod, Resources, task
+from flytekit.exceptions.user import FlyteRecoverableException
 from flytekitplugins.deck.renderer import FrameProfilingRenderer
-from more_itertools import chunked
 from shapely import box
 from union import map_task, workflow
 
 from flyte.utils import get_default_bucket
 from flytemosaic.datasets import DatasetEnum, get_dataset_protocol
-from flytemosaic.datasets.protocols import TileDate, TileDateUrl
+from flytemosaic.datasets.protocols import TileDateUrl
+from flytemosaic.datasets.utils import urls_exists
 
 _EPHEMERAL_STORAGE = 32 * 1024**3
 _SCRAPE_CONCURRENCY = 32
@@ -53,10 +54,10 @@ def get_required_scenes_task(
     return gdf
 
 
-@task(cache=True, cache_version=_cache_version(), requests=Resources(cpu="2", mem="8Gi"))
+@task(cache=True, cache_version=_cache_version(2), requests=Resources(cpu="2", mem="8Gi"))
 def partition_gdf_task(gdf: gpd.GeoDataFrame, dataset_enum: DatasetEnum) -> list[gpd.GeoDataFrame]:
     sp = get_dataset_protocol(dataset_enum=dataset_enum).scene_protocol
-    batch_size = int(_EPHEMERAL_STORAGE / (sp.max_bytes_per_file * 2))
+    batch_size = int(_EPHEMERAL_STORAGE / (sp.max_bytes_per_file * 4))
     return [gdf.iloc[i : i + batch_size] for i in range(0, len(gdf), batch_size)]
 
 
@@ -68,20 +69,28 @@ def partition_gdf_task(gdf: gpd.GeoDataFrame, dataset_enum: DatasetEnum) -> list
         flytekit.Secret(key="glad_password"),
     ],
     requests=Resources(cpu="4", mem="8Gi", ephemeral_storage=str(_EPHEMERAL_STORAGE)),
-    retries=3,
+    retries=3,  # retry on recoverable errors
 )
 def scrape_and_upload_batch_task(
     gdf: gpd.GeoDataFrame, dataset_enum: DatasetEnum
 ) -> gpd.GeoDataFrame:
     ctx = flytekit.current_context()
     scene_source = get_dataset_protocol(dataset_enum=dataset_enum).scene_protocol
-    return scene_source.scrape_tifs_uploads_cogs_batch(
-        gdf=gdf,
-        workdir=ctx.working_directory,
-        bucket=get_default_bucket(),
-        # user=ctx.secrets.get(key="glad_user"),
-        # password=ctx.secrets.get(key="glad_password"),
-    )
+    bucket = get_default_bucket()
+    # we check if any files have been ingested since we determined which to run
+    # and also in the event this task gets retried due to a recoverable error
+    # we only want to scrape and upload the missing files
+    urls = [scene_source.src_url_to_dst_url(src_url=url, bucket=bucket) for url in gdf["url"]]
+    exists = urls_exists(urls=urls, bucket=bucket)
+    try:
+        scene_source.scrape_tifs_and_upload_cogs_batch(
+            gdf=gdf.loc[~np.array(exists), :],
+            workdir=ctx.working_directory,
+            bucket=bucket,
+        )
+    except Exception as e:
+        raise FlyteRecoverableException(f"Recoverable error: {e}") from e
+    return gdf
 
 
 @task(
@@ -94,18 +103,11 @@ def scrape_and_upload_batch_task(
 def determine_scenes_to_ingest(
     gdf: gpd.GeoDataFrame, dataset_enum: DatasetEnum
 ) -> gpd.GeoDataFrame:
-    # determine remote paths
     scene_source = get_dataset_protocol(dataset_enum=dataset_enum).scene_protocol
     bucket = get_default_bucket()
     dst_urls = [scene_source.src_url_to_dst_url(src_url, bucket) for src_url in gdf["url"]]
-    fs = fsspec.get_filesystem_class(bucket.scheme)()
-    results = []
-    with LocalCluster(n_workers=16) as cluster, Client(cluster):
-        for chunk in chunked(dst_urls, int(2**14)):
-            tasks = [dask.delayed(lambda url: fs.exists(url))(url) for url in chunk]
-            results += dask.compute(tasks)
-    missing = [not r for rs in results for r in rs]
-    missing_gdf = gdf.loc[missing, :]
+    exists = urls_exists(urls=dst_urls, bucket=bucket, n_workers=16)
+    missing_gdf = gdf.loc[~np.array(exists), :]
     if len(missing_gdf) > 0:
         flytekit.Deck(
             "Summary",
@@ -187,42 +189,63 @@ def ingest_scenes_workflow(
 
 
 @task(cache=True, cache_version=_cache_version())
-def get_tile_dates_task(
+def get_tile_date_urls_task(
     bbox: list[float],
     dataset_enum: DatasetEnum,
     times: list[datetime.datetime],
-) -> list[TileDate]:
+) -> list[TileDateUrl]:
     dp = get_dataset_protocol(dataset_enum=dataset_enum)
+    bucket = get_default_bucket()
     times = list({dp.snap_to_temporal_grid(t) for t in times})
-    return dp.get_tile_dates(geo=box(*bbox), times=times)
+    return dp.get_tile_date_urls(geo=box(*bbox), times=times, bucket=bucket)
 
 
 @task(
     cache=True,
     cache_version=_cache_version(),
+    requests=Resources(cpu="4", mem="8Gi"),
+)
+def determine_tile_dates_to_ingest(
+    tile_date_urls: list[TileDateUrl],
+) -> list[TileDateUrl]:
+    exists = urls_exists(
+        urls=[tdurl.url for tdurl in tile_date_urls],
+        bucket=get_default_bucket(),
+        n_workers=16,  # used for localcluster given resources above
+    )
+    return [td for td, r in zip(tile_date_urls, exists, strict=True) if not r]
+
+
+@task(
+    cache=True,
+    cache_version=_cache_version(2),
     requests=Resources(cpu="3", mem="8Gi"),
 )
 def build_tile_date_feature_cog_task(
-    tile_date: TileDate,
+    tile_date_url: TileDateUrl,
     dataset_enum: DatasetEnum,
 ) -> TileDateUrl:
     dp = get_dataset_protocol(dataset_enum=dataset_enum)
     ctx = flytekit.current_context()
     with LocalCluster(n_workers=3) as cluster, Client(cluster):
         return dp.build_tile_date_cog(
-            tile_id=tile_date.tile_id,
-            time=tile_date.time,
+            tile_id=tile_date_url.tile_id,
+            time=tile_date_url.time,
             bucket=get_default_bucket(),
             workdir=ctx.working_directory,
         )
 
 
+def _hash_dataframe(gdf: gpd.GeoDataFrame) -> str:
+    return str(pd.util.hash_pandas_object(gdf))
+
+
 @task(cache=True, cache_version=_cache_version())
 def build_tile_date_url_gdf(
     tile_date_urls: list[TileDateUrl], dataset_enum: DatasetEnum
-) -> gpd.GeoDataFrame:
+) -> Annotated[gpd.GeoDataFrame, HashMethod(_hash_dataframe)]:
     dp = get_dataset_protocol(dataset_enum=dataset_enum)
-    geos = dp.get_geo_from_tile_ids(tile_ids=[tdu.tile_id for tdu in tile_date_urls])
+    geos = dp.tiles_to_geos(tile_ids=[tdu.tile_id for tdu in tile_date_urls])
     gdf = gpd.GeoDataFrame(tile_date_urls, geometry=geos, crs="EPSG:4326")
     gdf.rename(columns={"time": "datetime"}, inplace=True)
     return gdf[["url", "geometry", "datetime"]]
@@ -253,14 +276,20 @@ def build_scene_features_workflow(
         with the provided dataset. Will contains columns 'url', 'geometry',
         'datetime'.
     """
-    tile_dates = get_tile_dates_task(bbox=bbox, dataset_enum=dataset, times=times)
+    tile_date_urls = get_tile_date_urls_task(
+        bbox=bbox,
+        dataset_enum=dataset,
+        times=times,
+    )
 
-    feature_tile_cogs = map_task(
+    missing_tile_date_urls = determine_tile_dates_to_ingest(tile_date_urls=tile_date_urls)
+
+    map_task(
         partial(build_tile_date_feature_cog_task, dataset_enum=dataset),
         concurrency=32,
-    )(tile_date=tile_dates)
+    )(tile_date_url=missing_tile_date_urls)
 
     return build_tile_date_url_gdf(
-        tile_date_urls=feature_tile_cogs,
+        tile_date_urls=tile_date_urls,
         dataset_enum=dataset,
     )
