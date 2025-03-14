@@ -3,6 +3,8 @@ from dataclasses import dataclass
 from functools import partial
 from random import shuffle
 
+import dask
+import dask.config
 import flytekit
 import geopandas as gpd
 import pandas as pd
@@ -151,19 +153,20 @@ def write_mosaic_partition_task(
     dataset_enum: DatasetEnum,
     xy_chunksize: int,
 ) -> bool:
-    dp = get_dataset_protocol(dataset_enum=dataset_enum)
-
-    ds_time = build_gti_xarray(
-        gti=gti_partition.gti.gti.download(),
-        chunksize=xy_chunksize,
-        band_names=dp.bands,
-        time=gti_partition.gti.time,
-    )
-    region = {k: slice(*v) for k, v in gti_partition.partition.items()}
-    region_wo_time_slc = {k: v for k, v in region.items() if k != "time"}
-    subset = ds_time.isel(**region_wo_time_slc)  # type: ignore  # noqa: PGH003# type: ignore  # noqa: PGH003
-    subset["variables"].attrs.clear()
-    subset.drop("spatial_ref").to_zarr(store, region=region)
+    # single threaded dask scheduler but ALL_CPUS for GDAL_NUM_THREADS in environment
+    with dask.config.set(scheduler="single-threaded"):
+        dp = get_dataset_protocol(dataset_enum=dataset_enum)
+        ds_time = build_gti_xarray(
+            gti=gti_partition.gti.gti.download(),
+            chunksize=xy_chunksize,
+            band_names=dp.bands,
+            time=gti_partition.gti.time,
+        )
+        region = {k: slice(*v) for k, v in gti_partition.partition.items()}
+        region_wo_time_slc = {k: v for k, v in region.items() if k != "time"}
+        subset = ds_time.isel(**region_wo_time_slc)  # type: ignore  # noqa: PGH003# type: ignore  # noqa: PGH003
+        subset["variables"].attrs.clear()
+        subset.drop("spatial_ref").to_zarr(store, region=region)
     return True
 
 

@@ -1,14 +1,11 @@
 import datetime
 import datetime as dt
 import os
-import tempfile
 from functools import lru_cache
-from itertools import product
 from pathlib import Path
 
 import fsspec
 import geopandas as gpd
-import numpy as np
 import pandas as pd
 import rioxarray
 import xarray as xr
@@ -16,15 +13,8 @@ from fsspec.implementations.local import LocalFileSystem
 from shapely.geometry.base import BaseGeometry
 from yarl import URL
 
-from flytemosaic.datasets.protocols import (
-    SceneSourceProtocol,
-    TemporalDatasetProtocol,
-    TileDate,
-    TileDateUrl,
-)
-from flytemosaic.datasets.utils import (
-    download_files_with_fsspec,
-)
+from flytemosaic.datasets.protocols import SceneSourceProtocol, TemporalDatasetProtocol
+from flytemosaic.datasets.utils import download_files_with_fsspec
 
 # Server recently went down
 # HOST = "https://glad.umd.edu/"
@@ -48,22 +38,24 @@ def _datetime_to_period(time: dt.datetime) -> int:
 
 @lru_cache(maxsize=1)
 def _glad_tile_gdf() -> gpd.GeoDataFrame:
-    return gpd.read_parquet(
+    gdf = gpd.read_parquet(
         os.path.join(
             os.path.dirname(Path(__file__).parent),
             "data",
             "glad_tiling.parquet",
         )
     )
+    gdf.rename(columns={"TILE": "tile_id"}, inplace=True)
+    return gdf
 
 
 def _add_scene_url(period: int, gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     gdf = gdf.copy()
-    lats = gdf["TILE"].str.split("_").str[-1]
+    lats = gdf["tile_id"].str.split("_").str[-1]
     gdf["datetime"] = _period_to_datetime(period)
     gdf["url"] = [
         URL_PATTERN.format(lat=lat, tile=tile, period=period)
-        for lat, tile in zip(lats, gdf["TILE"], strict=True)
+        for lat, tile in zip(lats, gdf["tile_id"], strict=True)
     ]
     return gdf
 
@@ -82,6 +74,8 @@ class GladARDSceneSource(SceneSourceProtocol):
     max_bytes_per_file : int
         The maximum number of bytes per file for the dataset. Since they are
         all the same size, dtype, and number of bands, this is a constant.
+    host : str
+        The host for the glad.umd.edu or s3://glad.landsat.ard/ dataset.
     """
 
     @property
@@ -93,26 +87,11 @@ class GladARDSceneSource(SceneSourceProtocol):
         # 8 bands, 4004x4004 pixels, 2 bytes per pixel since uint16
         return 8 * 4004**2 * 2
 
-    def src_url_to_dst_url(self, src_url: str, bucket: URL, relative_dir: str = HOST) -> str:
-        """
-        Convert a source URL to a destination URL.
+    @property
+    def host(self) -> str:
+        return HOST
 
-        Parameters
-        ----------
-        src_url : str
-            The source URL with a https://glad.umd.edu/ prefix.
-        bucket : URL
-            The destination bucket URL.
-
-        Returns
-        -------
-        str
-            The expected destination url given the source url and bucket.
-        """
-
-        return str(self.scene_bucket(bucket) / str(Path(src_url).relative_to(relative_dir)))
-
-    def scrape_tifs_uploads_cogs_batch(
+    def scrape_tifs_and_upload_cogs_batch(
         self,
         gdf: gpd.GeoDataFrame,
         workdir: str,
@@ -149,10 +128,8 @@ class GladARDSceneSource(SceneSourceProtocol):
         # download batch of files in gdf['url'] to workdir
         download_files_with_fsspec(
             df=gdf,
-            url_column="url",  # use location from the beginning?
+            url_column="url",
             workdir=workdir,
-            # user=user,
-            # password=password,
         )
         # upload batch of files in workdir to scene bucket
         fs = fsspec.get_filesystem_class(bucket.scheme)()
@@ -178,12 +155,36 @@ class GladARDSceneSource(SceneSourceProtocol):
         # use relative url temporarily to match with downloaded_tifs
         relative_urls = [str(tif.relative_to(workdir)) for tif in downloaded_tifs]
         subset = gdf.loc[
-            (gdf["url"].apply(lambda x: str(Path(x).relative_to(HOST))).isin(relative_urls)),
+            (gdf["url"].apply(lambda x: str(Path(x).relative_to(self.host))).isin(relative_urls)),
             :,
         ]
         # Now point url to assets on the scene bucket
         subset["url"] = subset["url"].apply(lambda x: self.src_url_to_dst_url(x, bucket))
         return subset
+
+    def tile_date_to_scenes(
+        self,
+        tile_id: str,
+        bucket: URL,
+        time: datetime.datetime,
+        window: datetime.timedelta,
+        earliest: datetime.datetime,
+        latest: datetime.datetime,
+    ) -> list[str]:
+        return [
+            self.src_url_to_dst_url(
+                str(
+                    Path(
+                        URL_PATTERN.format(lat=tile_id.split("_")[-1], tile=tile_id, period=period)
+                    )
+                ),
+                bucket,
+            )
+            for period in range(
+                _datetime_to_period(max(time - window, earliest)),
+                _datetime_to_period(time=min(time, latest)) + 1,
+            )
+        ]
 
 
 class GladARDAnnualMean(TemporalDatasetProtocol):
@@ -193,11 +194,6 @@ class GladARDAnnualMean(TemporalDatasetProtocol):
     This dataset requires we download all the necessary scenes for a given
     geo and date, then calculate all the bands' annual median values and store
     to a deterministic location.
-
-    Attributes
-    ----------
-    scene_protocol : SceneSourceProtocol
-        The scene source protocol for the dataset.
     """
 
     @property
@@ -232,27 +228,22 @@ class GladARDAnnualMean(TemporalDatasetProtocol):
     def nodata(self) -> str:
         return "nan"
 
+    def snap_to_temporal_grid(self, time: datetime.datetime) -> datetime.datetime:
+        return datetime.datetime(time.year, 1, 1)
+
+    def geo_to_tiles(self, geo: BaseGeometry) -> gpd.GeoDataFrame:
+        tile_gdf = _glad_tile_gdf()
+        gdf = tile_gdf.loc[tile_gdf.intersects(geo), :]
+        return gdf[["tile_id", "geometry"]]
+
+    def tiles_to_geos(self, tile_ids: list[str]) -> list[BaseGeometry]:
+        glad_tile_index = _glad_tile_gdf().set_index("tile_id")
+        return glad_tile_index.loc[tile_ids, "geometry"].tolist()
+
     def get_required_scenes_gdf(
         self, geo: BaseGeometry, times: list[datetime.datetime]
     ) -> gpd.GeoDataFrame:
-        """
-        Get the required scene gdf for a geo and time range.
-
-        Parameters
-        ----------
-        geo : BaseGeometry
-            The geometry to use to determine which tiles to scrape.
-        times : list[datetime.datetime]
-            The times to use to determine which tiles to scrape.
-
-        Returns
-        -------
-        gpd.GeoDataFrame
-            The GeoDataFrame with the required scenes for the geo and time range
-            with columns "datetime", "url", and "geometry".
-        """
-        scene_gdf = _glad_tile_gdf()
-        relevant_tiles = scene_gdf.loc[scene_gdf.intersects(geo), :]
+        relevant_tiles = self.geo_to_tiles(geo=geo)
         periods = set()
         for t in times:
             start_period = _datetime_to_period(max(t - self.window, self.earliest))
@@ -263,118 +254,24 @@ class GladARDAnnualMean(TemporalDatasetProtocol):
             gdfs.append(_add_scene_url(period, relevant_tiles))
         return pd.concat(gdfs)[["datetime", "url", "geometry"]].reset_index(drop=True)
 
-    def snap_to_temporal_grid(self, time: datetime.datetime) -> datetime.datetime:
-        """
-        Snap a time to the temporal grid of the dataset.
-
-        Parameters
-        ----------
-        time : datetime.datetime
-            The time to snap to the temporal grid.
-
-        Returns
-        -------
-        datetime.datetime
-            The time quantized or snapped to the underlying datasets temporal grid.
-        """
-        return datetime.datetime(time.year, 1, 1)
-
-    def _get_required_scene_cogs(
-        self, tile_id: str, time: datetime.datetime, bucket: URL
-    ) -> list[str]:
-        start_period = _datetime_to_period(max(time - self.window, self.earliest))
-        end_period = _datetime_to_period(time=time)
-        return [
-            self.scene_protocol.src_url_to_dst_url(
-                str(
-                    Path(
-                        URL_PATTERN.format(lat=tile_id.split("_")[-1], tile=tile_id, period=period)
-                    )
-                ),
-                bucket,
-            )
-            for period in range(start_period, end_period + 1)
-        ]
-
-    def _get_tiles(self, geo: BaseGeometry) -> list[str]:
-        """
-        Get the tiles that intersect with the geo using glad ard native tiling.F
-
-        Parameters
-        ----------
-        geo : BaseGeometry
-            The geometry to use to determine which tiles to scrape.
-
-        Returns
-        -------
-        list[str]
-
-        """
-        # we could have used any tiling scheme here .e.g. morecantile
-        tiling_gdf = _glad_tile_gdf()
-        return tiling_gdf.loc[tiling_gdf.intersects(geo), "TILE"].drop_duplicates().tolist()
-
-    def get_tile_dates(self, geo: BaseGeometry, times: list[datetime.datetime]) -> list[TileDate]:
-        return [
-            TileDate(tile_id=tile_id, time=t)
-            for tile_id, t in product(
-                self._get_tiles(geo),
-                {self.snap_to_temporal_grid(time=t) for t in times},
-            )
-        ]
-
-    def get_tile_date_url(self, tile_id: str, time: datetime.datetime, bucket: URL) -> str:
-        # creates a deterministic URL for the derived feature COG
-        return str(
-            self.feature_bucket(bucket=bucket)
-            / f"{tile_id.split('_')[-1]}"
-            / f"{tile_id}"
-            / f"{time:%Y%m%d}.tif"
+    def scenes_to_feature_cog(self, array: xr.DataArray) -> xr.DataArray:
+        return (
+            array.where(array.sel(band=8) == 1)
+            .isel(band=range(7))
+            .mean(dim="time")
+            .astype("float32")
         )
 
-    def build_tile_date_cog(
-        self,
-        tile_id: str,
-        time: datetime.datetime,
-        bucket: URL,
-        workdir: str,
-    ) -> TileDateUrl:
-        url = self.get_tile_date_url(tile_id=tile_id, time=time, bucket=bucket)
-        fs = fsspec.get_filesystem_class(bucket.scheme)()
-        if not fs.exists(url):
-            required_cogs = self._get_required_scene_cogs(tile_id=tile_id, time=time, bucket=bucket)
 
-            # read and locally persist the required cogs
-            arrays: list[xr.DataArray] = [
-                rioxarray.open_rasterio(url, chunks="auto")
-                for url in required_cogs  # type: ignore # noqa: PGH003
-            ]
-            array = xr.concat(arrays, dim="time").chunk({"band": -1, "x": 512, "y": 512})
-            tmp_zarr = Path(workdir) / "locally_persisted.zarr"
-            array.to_dataset(name="variables").to_zarr(tmp_zarr, mode="w")
-            array = xr.open_zarr(tmp_zarr)["variables"]
+class GladARDAnnualMedian(GladARDAnnualMean):
+    @property
+    def name(self) -> str:
+        return "glad_annual_median"
 
-            # simplest of quality flags
-            array = array.where(array.sel(band=8) == 1)
-            # temporal composite using mean (nan tolerant!)
-            array = array.mean(dim="time").astype("float32")
-            # fill nodata with nan now that were are in float32
-            array = array.where(array != self.scene_protocol.nodata)
-            array.rio.write_nodata(np.nan, inplace=True)
-            # mean over quality flag is a bit meaningless
-            subset = array.isel(band=slice(0, 7)).compute()
-            with tempfile.NamedTemporaryFile(suffix=".tif") as f:
-                subset.rio.to_raster(
-                    f.name,
-                    driver="COG",
-                    # https://gdal.org/en/stable/drivers/raster/cog.html#creation-options
-                    BLOCKSIZE=512,
-                    BIGTIFF="IF_SAFER",
-                    NUM_THREADS="4",
-                )
-                fs.put(f.name, url)
-        return TileDateUrl(tile_id=tile_id, time=time, url=url)
-
-    def get_geo_from_tile_ids(self, tile_ids: list[str]) -> list[BaseGeometry]:
-        glad_tile_index = _glad_tile_gdf().set_index("TILE")
-        return glad_tile_index.loc[tile_ids, "geometry"].tolist()
+    def scenes_to_feature_cog(self, array: xr.DataArray) -> xr.DataArray:
+        return (
+            array.where(array.sel(band=8) == 1)
+            .isel(band=range(7))
+            .median(dim="time")
+            .astype("float32")
+        )

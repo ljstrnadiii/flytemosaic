@@ -1,15 +1,17 @@
 from enum import Enum
 
-from flytemosaic.datasets.glad import GladARDAnnualMean
+from flytemosaic.datasets.glad import GladARDAnnualMean, GladARDAnnualMedian
 from flytemosaic.datasets.protocols import TemporalDatasetProtocol
 
 
 class DatasetEnum(Enum):
     GLAD_ARD_ANNUAL_MEAN = "glad_ard_annual_mean"
+    GLAD_ARD_ANNUAL_MEDIAN = "glad_ard_annual_median"
 
 
 _DATASET_ENUM_TO_PROTOCOL: dict[DatasetEnum, TemporalDatasetProtocol] = {
     DatasetEnum.GLAD_ARD_ANNUAL_MEAN: GladARDAnnualMean(),
+    DatasetEnum.GLAD_ARD_ANNUAL_MEDIAN: GladARDAnnualMedian(),
 }
 
 
