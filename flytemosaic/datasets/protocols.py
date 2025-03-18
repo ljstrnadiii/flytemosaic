@@ -18,6 +18,7 @@ class TileDateUrl:
     tile_id: str
     time: datetime.datetime
     url: str
+    feature: str
 
 
 class SceneSourceProtocol(Protocol):
@@ -312,7 +313,7 @@ class TemporalDatasetProtocol(Protocol):
                 xfunc=self.scenes_to_feature_cog,
             )
             fs.put_file(derived_cog, url)
-        return TileDateUrl(tile_id=tile_id, time=time, url=url)
+        return TileDateUrl(tile_id=tile_id, time=time, url=url, feature=self.name)
 
     def get_tile_date_urls(
         self, geo: BaseGeometry, times: list[datetime.datetime], bucket: URL
@@ -320,6 +321,7 @@ class TemporalDatasetProtocol(Protocol):
         relevant_tiles = self.geo_to_tiles(geo=geo)["tile_id"].unique().tolist()
         return [
             TileDateUrl(
+                feature=self.name,
                 tile_id=tile_id,
                 time=t,
                 url=self.get_tile_date_url(tile_id=tile_id, time=t, bucket=bucket),

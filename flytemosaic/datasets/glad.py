@@ -165,6 +165,7 @@ class GladARDSceneSource(SceneSourceProtocol):
         tile_id: str,
         bucket: URL,
         time: datetime.datetime,
+        # TODO: we could force scene source to have earliest/latest property
         window: datetime.timedelta,
         earliest: datetime.datetime,
         latest: datetime.datetime,
@@ -194,9 +195,12 @@ class GladARDAnnualMean(TemporalDatasetProtocol):
     to a deterministic location.
     """
 
+    def __init__(self, name: str) -> None:
+        self._name = name
+
     @property
     def name(self) -> str:
-        return "glad_annual_mean"
+        return self._name
 
     @property
     def scene_protocol(self) -> SceneSourceProtocol:
@@ -262,9 +266,12 @@ class GladARDAnnualMean(TemporalDatasetProtocol):
 
 
 class GladARDAnnualMedian(GladARDAnnualMean):
+    def __init__(self, name: str) -> None:
+        self._name = name
+
     @property
     def name(self) -> str:
-        return "glad_annual_median"
+        return self._name
 
     def scenes_to_feature_cog(self, array: xr.DataArray) -> xr.DataArray:
         return (

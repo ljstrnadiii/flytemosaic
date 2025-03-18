@@ -97,12 +97,12 @@ def clean_project_bucket_workflow(password: str) -> None:
     ),
     enable_deck=True,
 )
-def plot_mosaic_task(store: str, factor: int) -> None:
+def plot_mosaic_task(store: str, factor: int, bands: list[int]) -> None:
     with Client():
         ds = xr.open_zarr(store)
         ds = (
             ds["variables"]
-            .isel(band=[2, 1, 0], time=0)
+            .isel(band=bands, time=0)
             .coarsen(x=factor, y=factor, boundary="trim")
             .mean()
             .compute()

@@ -3,7 +3,7 @@ import subprocess
 import tempfile
 from collections.abc import Generator
 from dataclasses import dataclass
-from itertools import product
+from itertools import groupby, product
 from math import floor
 from pathlib import Path
 
@@ -13,6 +13,8 @@ import rioxarray
 import xarray as xr
 from pyproj import CRS
 from rasterio.enums import Resampling
+
+from flytemosaic.datasets import DatasetEnum, get_dataset_protocol
 
 
 def build_recommended_gti(
@@ -177,8 +179,8 @@ def build_gti_xarray(
 class TemporalGTIMosaic:
     gti: str
     chunksize: int
-    band_names: list[str]
     time: datetime.datetime
+    dataset: DatasetEnum
 
 
 def build_temporal_mosaic(gti_mosaics: list[TemporalGTIMosaic]) -> xr.Dataset:
@@ -202,26 +204,33 @@ def build_temporal_mosaic(gti_mosaics: list[TemporalGTIMosaic]) -> xr.Dataset:
     xr.DataArray
         The mosaic DataArray with dims [time, band, y, x].
     """
-    return (
-        xr.concat(
-            [
-                build_gti_xarray(
-                    gti=gti.gti,
-                    chunksize=gti.chunksize,
-                    band_names=gti.band_names,
-                    time=gti.time,
-                )
-                for gti in gti_mosaics
-            ],
-            dim="time",
+    feature_dsets = []
+    for nm, grp in groupby(
+        sorted(gti_mosaics, key=lambda x: x.dataset.name),
+        key=lambda x: x.dataset,
+    ):
+        dp = get_dataset_protocol(dataset_enum=nm)
+        feature_dsets.append(
+            xr.concat(
+                [
+                    build_gti_xarray(
+                        gti=gti.gti,
+                        chunksize=gti.chunksize,
+                        band_names=dp.bands,
+                        time=gti.time,
+                    )
+                    for gti in grp
+                ],
+                dim="time",
+            )
         )
-        .transpose("time", "band", "y", "x")
-        .chunk({"time": 1})
+    return (
+        xr.concat(feature_dsets, dim="band").transpose("time", "band", "y", "x").chunk({"time": 1})
     )
 
 
 def build_mosaic_chunk_partitions(
-    ds: xr.Dataset, chunk_partition_size: float, variable_name: str
+    ds: xr.Dataset, chunk_partition_size: float, variable_name: str, bands: list[str]
 ) -> Generator[dict[str, tuple[int, int]], None, None]:
     """
     Given an Xarray Dataset with maximum chunk size build slice start/end indices.
@@ -241,7 +250,8 @@ def build_mosaic_chunk_partitions(
         The maximum size of the partition in bytes. The final size of the
     variable_name : str
         The example variable to use to inspect underlying chunks for size.
-
+    bands : list[str]
+        The list of bands to use for the DataArray.
 
     Returns
     -------
@@ -261,6 +271,8 @@ def build_mosaic_chunk_partitions(
         y_chunksize = xy_multiplier * ds.chunksizes["y"][0]
         ds = ds.chunk(x=x_chunksize, y=y_chunksize)
 
+    # TODO: is we subset then partitions get overwritten. We need to keep track
+    # of band indices
     chunk_idx = {dim: np.cumsum([0] + list(ds.chunksizes[dim])).tolist() for dim in ds.chunksizes}
     chunks = {
         dim: [(chunk_idx[dim][i], chunk_idx[dim][i + 1]) for i in range(len(chunk_idx[dim]) - 1)]
