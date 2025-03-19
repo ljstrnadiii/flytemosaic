@@ -120,7 +120,7 @@ class GTIPartition:
 
 @task(
     cache=True,
-    cache_version=_cache_version(),
+    cache_version=_cache_version(2),
     requests=Resources(cpu="3", mem="8Gi"),
 )
 def build_gti_partitions_task(
@@ -168,8 +168,9 @@ def write_mosaic_partition_task(
             time=gti_partition.gti.time,
         )
         region = {k: slice(*v) for k, v in gti_partition.partition.items()}
-        region_wo_time_slc = {k: v for k, v in region.items() if k != "time"}
-        subset = ds_time.isel(**region_wo_time_slc)  # type: ignore  # noqa: PGH003# type: ignore  # noqa: PGH003
+        # we drop time and band since the gti is now partitioned on both
+        subset_slices = {k: v for k, v in region.items() if k not in ["time", "band"]}
+        subset = ds_time.isel(**subset_slices)  # type: ignore  # noqa: PGH003
         subset["variables"].attrs.clear()
         subset.drop("spatial_ref").to_zarr(store, region=region)
     return True

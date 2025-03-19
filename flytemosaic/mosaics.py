@@ -233,7 +233,7 @@ def build_mosaic_chunk_partitions(
     ds: xr.Dataset, chunk_partition_size: float, variable_name: str, bands: list[str]
 ) -> Generator[dict[str, tuple[int, int]], None, None]:
     """
-    Given an Xarray Dataset with maximum chunk size build slice start/end indices.
+    Compute start/stop indices for integer multiples of chunks in x and y.
 
     This is used to slice integer multiples of chunks in x and y equally to give
     a mechanism to partition the dataset into smaller units of work. First, x
@@ -247,11 +247,15 @@ def build_mosaic_chunk_partitions(
     ds : xr.Dataset
         The xarray array from which to use chunk sizes to build partitions.
     chunk_partition_size : float
-        The maximum size of the partition in bytes. The final size of the
+        The maximum size of the partition in bytes. The final size of the partition
+        will be the largest integer multiple of the chunks in x and y and include
+        all the bands if provided.
     variable_name : str
         The example variable to use to inspect underlying chunks for size.
     bands : list[str]
-        The list of bands to use for the DataArray.
+        The list of bands to use for the partitioned chunks. If provided, the
+        final chunks will include start and stops for the bands. This means that
+        the bands must be contiguous and will raise an error if not.
 
     Returns
     -------
@@ -260,23 +264,40 @@ def build_mosaic_chunk_partitions(
         lists of tuples of start and end indices for each chunk partition. We
         avoid slice objects explicitly in favor of primitive types for easier
         serialization for distributed computing.
+
+    Raises
+    ------
+    ValueError
+        If the optional bands are not contiguous coordinates.
     """
-    ds = ds.chunk({"band": -1})
-    arr = ds[variable_name].data
+    # chunks include all bands
+    subset = ds.sel(band=bands) if bands else ds
+    subset = subset.chunk({"band": -1})
+
+    # estimate the bytes per chunk
+    arr = subset[variable_name].data
     bytes_per_chunk = int(np.prod(arr.chunksize) * arr.dtype.itemsize)
 
     xy_multiplier = max(1, floor((chunk_partition_size // bytes_per_chunk) ** 0.5))
     if xy_multiplier != 1:
-        x_chunksize = xy_multiplier * ds.chunksizes["x"][0]
-        y_chunksize = xy_multiplier * ds.chunksizes["y"][0]
-        ds = ds.chunk(x=x_chunksize, y=y_chunksize)
+        x_chunksize = xy_multiplier * subset.chunksizes["x"][0]
+        y_chunksize = xy_multiplier * subset.chunksizes["y"][0]
+        subset = subset.chunk(x=x_chunksize, y=y_chunksize)
 
-    # TODO: is we subset then partitions get overwritten. We need to keep track
-    # of band indices
-    chunk_idx = {dim: np.cumsum([0] + list(ds.chunksizes[dim])).tolist() for dim in ds.chunksizes}
+    chunk_idx = {
+        dim: np.cumsum([0] + list(subset.chunksizes[dim])).tolist() for dim in subset.chunksizes
+    }
+    # Use the original dataset to create offset for provided bands
+    if bands:
+        idx = [ds.get_index("band").get_loc(v) for v in bands]
+        # check that idx is contiguous
+        if idx != list(range(idx[0], idx[-1] + 1)):
+            raise ValueError("Band indices are not contiguous")
+        chunk_idx.update({"band": (idx[0], idx[-1] + 1)})
+
     chunks = {
         dim: [(chunk_idx[dim][i], chunk_idx[dim][i + 1]) for i in range(len(chunk_idx[dim]) - 1)]
         for dim in chunk_idx
     }
     for slc in product(*chunks.values()):
-        yield dict(zip(list(ds.chunksizes.keys()), slc, strict=True))  # type: ignore  # noqa: PGH003
+        yield dict(zip(list(subset.chunksizes.keys()), slc, strict=True))  # type: ignore  # noqa: PGH003
