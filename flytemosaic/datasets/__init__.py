@@ -10,8 +10,12 @@ class DatasetEnum(Enum):
 
 
 _DATASET_ENUM_TO_PROTOCOL: dict[DatasetEnum, TemporalDatasetProtocol] = {
-    DatasetEnum.GLAD_ARD_ANNUAL_MEAN: GladARDAnnualMean(),
-    DatasetEnum.GLAD_ARD_ANNUAL_MEDIAN: GladARDAnnualMedian(),
+    DatasetEnum.GLAD_ARD_ANNUAL_MEAN: GladARDAnnualMean(
+        name=DatasetEnum.GLAD_ARD_ANNUAL_MEAN.value
+    ),
+    DatasetEnum.GLAD_ARD_ANNUAL_MEDIAN: GladARDAnnualMedian(
+        name=DatasetEnum.GLAD_ARD_ANNUAL_MEDIAN.value
+    ),
 }
 
 
