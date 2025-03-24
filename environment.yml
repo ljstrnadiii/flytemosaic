@@ -21,6 +21,8 @@ dependencies:
   - pip
   - pip:
       - flytekitplugins-dask>=1.15.0
+      # - flytekitplugins-geopandas # uncomment once flytekit releases and remove from docker
+      # - flytekitplugins-xarray-zarr # uncomment once flytekit releases and remove from docker
       - flytekitplugins-deck-standard # used for rendering a deck summary of dfs
       - union>=0.1.152
       # below items are for development

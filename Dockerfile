@@ -21,6 +21,14 @@ COPY flyte ./flyte/
 # Install Python package in editable mode
 RUN micromamba run -n $ENV_NAME pip install -e . --no-deps
 
+
+# remove once plugins get published on next flytekit release
+USER root
+RUN apt-get update && apt-get install -y git
+USER mambauser
+RUN micromamba run -n $ENV_NAME pip install git+https://github.com/ljstrnadiii/flytekit.git@add_xarray_support#subdirectory=plugins/flytekit-xarray-zarr
+RUN micromamba run -n $ENV_NAME pip install git+https://github.com/ljstrnadiii/flytekit.git@fix_geopandas_plugin#subdirectory=plugins/flytekit-geopandas
+
 # Temp fix: Change user to root since fast registering copies into /root
 # (Consider specifying `--destination-dir` in `register` instead)
 USER root
